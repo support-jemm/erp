@@ -1,4 +1,0 @@
-recursive-include fashion_retail *.py
-recursive-include public *
-include hooks.py
-
