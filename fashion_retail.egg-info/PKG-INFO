@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: fashion_retail
+Version: 0.0.1
+Summary: Fashion Retail Customizations
+Author: User
+Author-email: user@example.com
+Dynamic: author
+Dynamic: author-email
+Dynamic: summary
