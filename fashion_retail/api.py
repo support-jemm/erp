@@ -65,12 +65,21 @@ def _default_stock_uom() -> str:
 	return "Nos"
 
 @frappe.whitelist()
-def create_fashion_items(item_code, item_group, brand, color, sizes):
+def create_fashion_items(item_code, item_group, brand, color, sizes, sizes_qty=None):
 	"""
 	Creates multiple Items based on fashion retail workflow.
 	Returns list of created item documents.
 	"""
 	sizes_list = [s.strip() for s in sizes.split(",") if s.strip()]
+	
+	qty_map = {}
+	try:
+		if isinstance(sizes_qty, str) and sizes_qty:
+			qty_map = json.loads(sizes_qty)
+		elif isinstance(sizes_qty, dict):
+			qty_map = sizes_qty
+	except Exception:
+		qty_map = {}
 	
 	if not sizes_list:
 		frappe.throw("At least one size is required")
@@ -98,7 +107,16 @@ def create_fashion_items(item_code, item_group, brand, color, sizes):
 		# Check if already exists
 		if frappe.db.exists("Item", variant_item_code):
 			# Return existing
-			created_items.append(frappe.get_doc("Item", variant_item_code))
+			item = frappe.get_doc("Item", variant_item_code)
+			created_items.append({
+				"name": item.name,
+				"item_code": item.item_code,
+				"item_name": item.item_name,
+				"stock_uom": item.stock_uom,
+				"barcode": item.barcodes[0].barcode if item.barcodes else None,
+				"size": size,
+				"qty": float(qty_map.get(size) or 0) or None
+			})
 			continue
 		
 		# Create new Item
@@ -119,7 +137,15 @@ def create_fashion_items(item_code, item_group, brand, color, sizes):
 		
 		try:
 			item.insert(ignore_permissions=True)
-			created_items.append(item)
+			created_items.append({
+				"name": item.name,
+				"item_code": item.item_code,
+				"item_name": item.item_name,
+				"stock_uom": item.stock_uom,
+				"barcode": item.barcodes[0].barcode if item.barcodes else None,
+				"size": size,
+				"qty": float(qty_map.get(size) or 0) or None
+			})
 		except Exception as e:
 			msg = f"{variant_item_code}: {str(e)}"
 			errors.append(msg)
@@ -133,16 +159,7 @@ def create_fashion_items(item_code, item_group, brand, color, sizes):
 	
 	# Return items in format suitable for adding to parent document
 	return {
-		"items": [
-			{
-				"name": item.name,
-				"item_code": item.item_code,
-				"item_name": item.item_name,
-				"stock_uom": item.stock_uom,
-				"barcode": item.barcodes[0].barcode if item.barcodes else None
-			}
-			for item in created_items
-		],
+		"items": created_items,
 		"count": len(created_items),
 		"errors": errors
 	}

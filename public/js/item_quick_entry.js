@@ -9,7 +9,7 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
         super(doctype, after_insert, init_callback, doc, force);
         this.skip_redirect_on_error = true;
         this._sizes_all = [];
-        this._sizes_selected = new Set();
+        this._size_qty = {};
     }
 
     render_dialog() {
@@ -41,8 +41,11 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
         this.dialog.fields_dict.size_preset.$input.on('change', function () {
             let preset = me.dialog.get_value('size_preset');
             let sizes = me._preset_map && me._preset_map[preset];
-            if (sizes) me.dialog.set_value('custom_sizes', sizes);
-            me._rebuild_size_grid_from_sizes_string();
+            if (sizes) {
+                me.dialog.set_value('custom_sizes', sizes);
+            }
+            // Wait for value propagation before rebuild
+            setTimeout(() => me._rebuild_size_grid_from_sizes_string(), 0);
         });
 
         // Update grid on sizes list change
@@ -96,8 +99,11 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
                 if (def && me._preset_map[def]) {
                     me.dialog.set_value('size_preset', def);
                     me.dialog.set_value('custom_sizes', me._preset_map[def]);
-                    me._rebuild_size_grid_from_sizes_string();
+                    // Ensure sizes are visible immediately after auto-select
+                    setTimeout(() => me._rebuild_size_grid_from_sizes_string(), 0);
                 }
+                // If a preset is already selected, rebuild to refresh grid
+                setTimeout(() => me._rebuild_size_grid_from_sizes_string(), 0);
             },
             error: function (err) {
                 console.error('Failed to load size presets', err);
@@ -134,15 +140,17 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
                 label: __('Color (Колір)'),
                 fieldname: 'custom_color',
                 fieldtype: 'Data',
-                reqd: 1,
-                description: 'Наприклад: Чорний, Червоний'
+                reqd: 1
             },
             {
                 label: __('Name'),
                 fieldname: 'generated_name',
                 fieldtype: 'Data',
-                read_only: 1,
-                description: __('Auto-generated: Category, Brand, Article, Color, Size')
+                read_only: 1
+            },
+            {
+                fieldtype: 'Section Break',
+                label: __('Sizes')
             },
             {
                 label: __('Size Preset'),
@@ -151,49 +159,27 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
                 options: '\n'
             },
             {
-                label: __('Sizes List (advanced)'),
+                label: __('Custom Sizes'),
                 fieldname: 'custom_sizes',
                 fieldtype: 'Data',
-                description: __('Optional. Comma separated list used to build the size grid. Example: 36, 38, 40, 42')
+                hidden: 1
             },
             {
-                label: __('Sizes Grid (Сітка розмірів)'),
+                label: __('Sizes'),
                 fieldname: 'sizes_grid',
                 fieldtype: 'HTML',
                 // NOTE: HTML fields don't have a value; making them reqd triggers "Missing Values Required".
                 // We validate size selection in insert().
                 reqd: 0
-            },
-            {
-                fieldtype: 'Section Break',
-                label: __('Preview')
-            },
-            {
-                label: __('Items Count'),
-                fieldname: 'items_count',
-                fieldtype: 'Int',
-                read_only: 1,
-                default: 0
-            },
-            {
-                label: __('Generated Names'),
-                fieldname: 'names_preview',
-                fieldtype: 'Small Text',
-                read_only: 1
-            },
-            {
-                label: __('Barcode'),
-                fieldname: 'barcode_preview',
-                fieldtype: 'Data',
-                read_only: 1,
-                default: __('Will be generated automatically on Save')
             }
         ];
     }
 
-    update_count() {
-        let count = Array.from(this._sizes_selected).length;
-        this.dialog.set_value('items_count', count);
+    _sizes_with_qty() {
+        return (this._sizes_all || []).filter(sz => {
+            const qty = Number(this._size_qty[sz] || 0);
+            return qty > 0;
+        });
     }
 
     _parse_sizes_string(sizes_string) {
@@ -216,20 +202,18 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
         const sizes = this._parse_sizes_string(sizes_string);
         this._sizes_all = sizes;
 
-        // Keep selection where possible
-        const next_selected = new Set();
+        // Keep qty where possible, initialize new sizes with qty = 1
+        const next_qty = {};
         sizes.forEach(sz => {
-            if (this._sizes_selected.has(sz)) next_selected.add(sz);
+            if (this._size_qty.hasOwnProperty(sz)) {
+                next_qty[sz] = this._size_qty[sz];
+            } else {
+                next_qty[sz] = 1;
+            }
         });
-        this._sizes_selected = next_selected;
-
-        // If there are sizes but nothing selected yet, auto-select all (more convenient)
-        if (sizes.length && this._sizes_selected.size === 0) {
-            sizes.forEach(sz => this._sizes_selected.add(sz));
-        }
+        this._size_qty = next_qty;
 
         this._render_size_grid();
-        this.update_count();
         this._update_names_preview();
     }
 
@@ -239,57 +223,49 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
 
         const sizes = this._sizes_all || [];
         if (!sizes.length) {
-            wrapper.append(
-                `<div class="text-muted">${this._escape_html(__('Choose a preset or enter sizes list to build the grid.'))}</div>`
-            );
+            wrapper.append(`<div>${this._escape_html(__('No sizes available.'))}</div>`);
             return;
         }
 
-        const pills = sizes.map(sz => {
-            const active = this._sizes_selected.has(sz) ? 'active' : '';
+        const rows = sizes.map(sz => {
+            const qty = this._size_qty[sz] ?? 0;
             return `
-                <button type="button"
-                    class="btn btn-default btn-xs fashion-size-pill ${active}"
-                    data-size="${this._escape_html(sz)}"
-                    style="margin: 0 6px 6px 0;"
-                >${this._escape_html(sz)}</button>
+                <div class="fashion-size-row" data-size="${this._escape_html(sz)}" style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
+                    <div style="width:120px; font-weight:600;">${this._escape_html(sz)}</div>
+                    <input type="number" min="0" step="1" class="form-control fashion-size-qty" style="width:140px;" value="${qty}">
+                </div>
             `;
         }).join('');
 
         wrapper.append(`
             <div style="margin-bottom: 8px;">
-                <div class="text-muted" style="margin-bottom: 6px;">${this._escape_html(__('Click sizes to toggle selection.'))}</div>
-                <div>${pills}</div>
+                ${rows}
             </div>
-            <div style="margin-top: 8px;">
-                <button type="button" class="btn btn-xs btn-secondary fashion-size-select-all">${this._escape_html(__('Select All'))}</button>
+            <div style="margin-top: 6px;">
+                <button type="button" class="btn btn-xs btn-secondary fashion-size-fill-1">${this._escape_html(__('Set all to 1'))}</button>
                 <button type="button" class="btn btn-xs btn-secondary fashion-size-clear" style="margin-left: 6px;">${this._escape_html(__('Clear'))}</button>
             </div>
         `);
 
         const me = this;
-        wrapper.find('.fashion-size-pill').on('click', function () {
-            const sz = $(this).data('size');
+        wrapper.find('.fashion-size-qty').on('input', function () {
+            const $row = $(this).closest('.fashion-size-row');
+            const sz = $row.data('size');
             if (!sz) return;
-            if (me._sizes_selected.has(sz)) me._sizes_selected.delete(sz);
-            else me._sizes_selected.add(sz);
-
-            $(this).toggleClass('active', me._sizes_selected.has(sz));
-            me.update_count();
+            const v = Number($(this).val() || 0);
+            me._size_qty[sz] = Math.max(0, isNaN(v) ? 0 : v);
             me._update_names_preview();
         });
 
-        wrapper.find('.fashion-size-select-all').on('click', function () {
-            me._sizes_selected = new Set(me._sizes_all || []);
+        wrapper.find('.fashion-size-fill-1').on('click', function () {
+            (me._sizes_all || []).forEach(sz => { me._size_qty[sz] = 1; });
             me._render_size_grid();
-            me.update_count();
             me._update_names_preview();
         });
 
         wrapper.find('.fashion-size-clear').on('click', function () {
-            me._sizes_selected = new Set();
+            (me._sizes_all || []).forEach(sz => { me._size_qty[sz] = 0; });
             me._render_size_grid();
-            me.update_count();
             me._update_names_preview();
         });
     }
@@ -300,7 +276,7 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
         const article = (this.dialog.get_value('item_code') || '').trim();
         const color = (this.dialog.get_value('custom_color') || '').trim();
 
-        const sizes = Array.from(this._sizes_selected);
+        const sizes = this._sizes_with_qty();
         const make_name = (size) => {
             let name = `${item_group}`;
             if (brand) name += ` ${brand}`;
@@ -312,14 +288,6 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
         const first_size = sizes[0] || '';
         const generated_name = (first_size && item_group && article && color) ? make_name(first_size) : '';
         this.dialog.set_value('generated_name', generated_name);
-
-        // Multi-line preview for all (or many) sizes
-        const lines = sizes.slice(0, 12).map(make_name);
-
-        let preview = lines.join('\n');
-        if (sizes.length > 12) preview += `\n… +${sizes.length - 12} more`;
-
-        this.dialog.set_value('names_preview', preview);
     }
 
     _should_add_to_purchase_invoice() {
@@ -331,16 +299,36 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
             && cur_frm.fields_dict.items);
     }
 
-    _add_items_to_purchase_invoice(items) {
+    _add_items_to_purchase_invoice(items, qty_map) {
         if (!this._should_add_to_purchase_invoice()) return;
         if (!Array.isArray(items) || !items.length) return;
 
+        const size_qty = qty_map || {};
+
+        const set_qty_for_item = (item_code, qty) => {
+            const rows = (cur_frm.doc.items || []).filter(r => r.item_code === item_code);
+            if (rows.length) {
+                rows.forEach(r => {
+                    frappe.model.set_value(r.doctype, r.name, 'qty', qty);
+                });
+                return true;
+            }
+            return false;
+        };
+
         // First item goes into the field that triggered quick entry (handled via update_calling_link / after_insert)
+        const first = items[0];
+        const first_qty = Math.max(1, Number(size_qty[first.size] || 1));
+        // Try immediately, then once more after link field updates
+        set_qty_for_item(first.item_code, first_qty);
+        setTimeout(() => set_qty_for_item(first.item_code, first_qty), 200);
+
         const rest = items.slice(1);
         rest.forEach(item => {
             const row = cur_frm.add_child('items');
             frappe.model.set_value(row.doctype, row.name, 'item_code', item.item_code);
-            frappe.model.set_value(row.doctype, row.name, 'qty', 1);
+            const qty = Math.max(1, Number(size_qty[item.size] || 1));
+            frappe.model.set_value(row.doctype, row.name, 'qty', qty);
         });
 
         cur_frm.refresh_field('items');
@@ -390,31 +378,13 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
                 return;
             }
 
-            let sizes_selected = Array.from(me._sizes_selected).filter(Boolean);
-            if (!sizes_selected.length) {
-                // Fallback: if user typed sizes but didn't click pills (change/input events might not fire),
-                // treat the typed list as selected.
-                const sizes_field = me.dialog.fields_dict && me.dialog.fields_dict.custom_sizes;
-                const sizes_string =
-                    (sizes_field && sizes_field.get_value && sizes_field.get_value()) ||
-                    me.dialog.get_value('custom_sizes') ||
-                    '';
-                const parsed = me._parse_sizes_string(sizes_string);
-                if (parsed.length) {
-                    me._sizes_selected = new Set(parsed);
-                    me._sizes_all = parsed;
-                    me._render_size_grid();
-                    me.update_count();
-                    me._update_names_preview();
-                    sizes_selected = parsed;
-                }
-            }
-
+            const qty_map = { ...(me._size_qty || {}) };
+            let sizes_selected = (me._sizes_all || []).filter(sz => Number(qty_map[sz] || 0) > 0);
             if (!sizes_selected.length) {
                 frappe.msgprint({
                     title: __('Missing Sizes'),
                     indicator: 'red',
-                    message: __('Please select at least one size in the grid.')
+                    message: __('Please enter quantity for at least one size.')
                 });
                 me.dialog.working = false;
                 resolve(me.dialog.doc);
@@ -428,7 +398,8 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
                     item_group: values.item_group,
                     brand: values.brand || '',
                     color: values.custom_color,
-                    sizes: sizes_selected.join(', ')
+                    sizes: sizes_selected.join(', '),
+                    sizes_qty: JSON.stringify(qty_map)
                 },
                 freeze: true,
                 freeze_message: __('Creating Items...'),
@@ -453,7 +424,7 @@ frappe.ui.form.ItemQuickEntryForm = class ItemQuickEntryForm extends frappe.ui.f
                             me.after_insert(items[0]);
                         }
 
-                        me._add_items_to_purchase_invoice(items);
+                        me._add_items_to_purchase_invoice(items, qty_map);
                         me._msgprint_created(items);
 
                         me.dialog.hide();
